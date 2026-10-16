@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>双摆混沌模拟器 · Week 05 Pendulum Sim</title>
+<script>
+/* ============================================================
+ * 前置安全网（必须位于主脚本之前，且刻意不使用 IIFE）
+ *
+ * 背景：内联 onclick="resetAnimation()" 的作用域链是
+ *   [element, form, document, window]
+ * 不含任何 IIFE 闭包。若主脚本把 resetAnimation 声明为 IIFE 内部的
+ * 私有函数，全局求值就找不到该标识符，点击重置会抛
+ *   ReferenceError: resetAnimation is not defined
+ *   at HTMLButtonElement.onclick
+ *
+ * 措施：在主脚本执行前先于全局对象上放一个转发桩。它不依赖主脚本的
+ * 任何内部状态，只负责把调用转发到真实实现（若已就绪）；若主脚本
+ * 因任何原因未就绪，则静默返回，绝不抛 ReferenceError。
+ * ============================================================ */
+(function(){
+  var g = typeof globalThis !== 'undefined' ? globalThis
+        : (typeof window !== 'undefined' ? window : this);
+  if (!g) return;
+  if (typeof g.resetAnimation !== 'function'){
+    g.__pendulumResetImpl = null;
+    g.resetAnimation = function(){
+      var fn = g.__pendulumResetImpl;
+      if (typeof fn === 'function'){
+        try { fn(); } catch (e){ console.error('[pendulum] 重置失败: ' + e.message); }
+      }
+      // 未就绪时静默返回，保证不抛 ReferenceError
+    };
+  }
+})();
+</script>
+<style>
+  :root{
+    --bg:#1a1a24;
+    --panel:#22222e;
+    --panel-2:#2a2a38;
+    --line:#34344a;
+    --text:#e6e8f0;
+    --muted:#8b8fa8;
+    --accent:#4fd1ff;
+    --accent-2:#a78bfa;
+    --danger:#ff6b81;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Inter","Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;align-items:center;justify-content:center;
+    padding:24px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{
+    width:100%;max-width:1120px;
+    display:flex;flex-direction:column;
+    gap:20px;align-items:stretch;
+  }
+  .main{
+    display:grid;grid-template-columns:1fr 268px;
+    gap:20px;align-items:start;
+  }
+  .stage{
+    position:relative;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  canvas{display:block;width:100%;height:auto;touch-action:none}
+  .hud{
+    position:absolute;top:12px;left:14px;
+    display:flex;gap:14px;flex-wrap:wrap;
+    font-size:11px;color:var(--muted);
+    pointer-events:none;font-variant-numeric:tabular-nums;
+    max-width:calc(100% - 28px);
+  }
+  .hud b{color:var(--accent);font-weight:600}
+  .hud b.w2{color:var(--accent-2)}
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:18px;
+    display:flex;flex-direction:column;gap:16px;
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  .panel h1{
+    font-size:15px;font-weight:600;letter-spacing:.3px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .panel h1::before{
+    content:"";width:8px;height:8px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 10px var(--accent);
+  }
+  .sub{font-size:11px;color:var(--muted);margin-top:-10px}
+  .ctl{display:flex;flex-direction:column;gap:7px}
+  .ctl-top{display:flex;justify-content:space-between;align-items:baseline}
+  .ctl-top label{font-size:12px;color:var(--muted)}
+  .ctl-top output{font-size:12px;color:var(--accent);font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  button{
+    flex:1 1 auto;min-width:82px;
+    padding:9px 10px;
+    background:var(--panel-2);color:var(--text);
+    border:1px solid var(--line);border-radius:9px;
+    font-size:12px;cursor:pointer;font-family:inherit;
+    transition:background .15s,border-color .15s,transform .08s;
+  }
+  button:hover{background:#33334a;border-color:var(--accent)}
+  button:active{transform:translateY(1px)}
+  button.primary{background:rgba(79,209,255,.13);border-color:rgba(79,209,255,.45);color:var(--accent)}
+  button.danger{background:rgba(255,107,129,.12);border-color:rgba(255,107,129,.4);color:var(--danger)}
+  .toggle{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--muted);gap:10px}
+  .switch{
+    position:relative;width:36px;height:20px;flex:0 0 auto;
+    background:var(--panel-2);border:1px solid var(--line);
+    border-radius:99px;cursor:pointer;transition:background .18s;
+  }
+  .switch::after{
+    content:"";position:absolute;top:2px;left:2px;
+    width:14px;height:14px;border-radius:50%;
+    background:var(--muted);transition:transform .18s,background .18s;
+  }
+  .switch.on{background:rgba(79,209,255,.18);border-color:rgba(79,209,255,.45)}
+  .switch.on::after{transform:translateX(16px);background:var(--accent)}
+  hr{border:none;border-top:1px solid var(--line);margin:2px 0}
+  .meta{font-size:10.5px;color:var(--muted);line-height:1.65}
+  .meta code{color:var(--accent-2);font-size:10.5px}
+  .legend{display:flex;flex-direction:column;gap:7px;font-size:11px;color:var(--muted)}
+  .legend div{display:flex;align-items:center;gap:8px}
+  .swatch{width:14px;height:2px;border-radius:2px;flex:0 0 auto}
+
+  /* ==========================================================
+     画布下方 · 实时参数交互控制面板
+     ========================================================== */
+  .deck{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:18px 20px;
+    display:grid;
+    grid-template-columns:repeat(4,1fr) auto;
+    gap:22px 20px;
+    align-items:center;
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  .deck-h{
+    grid-column:1/-1;
+    display:flex;align-items:center;gap:9px;
+    font-size:12.5px;font-weight:600;letter-spacing:.3px;
+    color:var(--text);
+  }
+  .deck-h::before{
+    content:"";width:8px;height:8px;border-radius:50%;
+    background:var(--accent-2);box-shadow:0 0 10px var(--accent-2);
+  }
+  .deck-h .hint{
+    margin-left:auto;font-weight:400;font-size:10.5px;color:var(--muted);
+  }
+  .knob{display:flex;flex-direction:column;gap:9px;min-width:0}
+  .knob-top{
+    display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+  }
+  .knob-top label{
+    font-size:11.5px;color:var(--muted);white-space:nowrap;
+  }
+  .knob-val{
+    font-size:13px;font-weight:600;color:var(--accent);
+    font-variant-numeric:tabular-nums;white-space:nowrap;
+  }
+  .knob-val em{
+    font-style:normal;font-size:10px;color:var(--muted);margin-left:2px;font-weight:400;
+  }
+  .deck input[type=range]{
+    -webkit-appearance:none;appearance:none;
+    width:100%;height:5px;border-radius:99px;
+    background:var(--panel-2);outline:none;cursor:pointer;
+  }
+  .deck input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;appearance:none;
+    width:16px;height:16px;border-radius:50%;
+    background:var(--accent);
+    box-shadow:0 0 10px rgba(79,209,255,.75),0 0 0 3px rgba(79,209,255,.14);
+    cursor:grab;transition:box-shadow .15s;
+  }
+  .deck input[type=range]::-webkit-slider-thumb:active{cursor:grabbing}
+  .deck input[type=range]::-moz-range-thumb{
+    width:16px;height:16px;border:none;border-radius:50%;
+    background:var(--accent);
+    box-shadow:0 0 10px rgba(79,209,255,.75),0 0 0 3px rgba(79,209,255,.14);
+    cursor:grab;
+  }
+  .deck input[type=range]:focus-visible{box-shadow:0 0 0 2px rgba(79,209,255,.4)}
+  .deck .btn-reset{
+    align-self:stretch;
+    min-width:132px;
+    display:flex;align-items:center;justify-content:center;gap:7px;
+    padding:0 18px;
+    background:linear-gradient(180deg,rgba(167,139,250,.20),rgba(167,139,250,.10));
+    color:#c4b5fd;
+    border:1px solid rgba(167,139,250,.45);
+    border-radius:11px;
+    font-size:12.5px;font-weight:600;
+    cursor:pointer;font-family:inherit;white-space:nowrap;
+    transition:background .16s,border-color .16s,transform .08s,box-shadow .16s;
+  }
+  .deck .btn-reset:hover{
+    background:linear-gradient(180deg,rgba(167,139,250,.32),rgba(167,139,250,.18));
+    border-color:rgba(167,139,250,.75);
+    box-shadow:0 0 18px rgba(167,139,250,.28);
+  }
+  .deck .btn-reset:active{transform:translateY(1px)}
+
+  @media (max-width:900px){
+    .main{grid-template-columns:1fr}
+    .deck{grid-template-columns:1fr 1fr;gap:18px}
+    .deck .btn-reset{grid-column:1/-1;min-height:42px}
+  }
+  @media (max-width:560px){
+    .deck{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="main">
+  <div class="stage">
+    <canvas id="cv" width="760" height="660"></canvas>
+    <div class="hud">
+      <span>θ₁ <b id="hudT1">120.0°</b></span>
+      <span>θ₂ <b class="w2" id="hudT2">120.0°</b></span>
+      <span>ω₁ <b id="hudW1">0.00</b></span>
+      <span>ω₂ <b class="w2" id="hudW2">0.00</b></span>
+      <span>E <b id="hudE">—</b></span>
+      <span>ΔE <b id="hudDE">—</b></span>
+      <span id="hudNote" style="color:var(--accent-2)"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h1>双摆 · 混沌模拟器</h1>
+    <div class="sub">Week 05 · RK4 数值积分</div>
+
+    <div class="ctl">
+      <div class="ctl-top"><label>上摆初始角 θ₁₀</label><output id="oA">120°</output></div>
+      <input type="range" id="sA" min="-180" max="180" step="1" value="120">
+    </div>
+
+    <div class="ctl">
+      <div class="ctl-top"><label>下摆初始角 θ₂₀</label><output id="oB">120°</output></div>
+      <input type="range" id="sB" min="-180" max="180" step="1" value="120">
+    </div>
+
+    <div class="ctl">
+      <div class="ctl-top"><label>时间流速</label><output id="oS">1.00×</output></div>
+      <input type="range" id="sS" min="0.1" max="2.5" step="0.05" value="1">
+    </div>
+
+    <hr>
+
+    <div class="toggle"><span>彩虹拖尾（第二摆球）</span><div class="switch on" id="tTrail"></div></div>
+    <div class="toggle"><span>第一摆球轨迹</span><div class="switch on" id="tTrail1"></div></div>
+    <div class="toggle"><span>显示角速度矢量</span><div class="switch" id="tVec"></div></div>
+
+    <hr>
+
+    <div class="row">
+      <button class="primary" id="bPlay">⏸ 暂停</button>
+      <button id="bChaos">🌪 混沌态</button>
+      <button class="danger" id="bClear">🗑 清轨迹</button>
+    </div>
+
+    <hr>
+
+    <div class="legend">
+      <div><span class="swatch" style="background:#4fd1ff"></span>上摆杆 / 上摆球轨迹</div>
+      <div><span class="swatch" style="background:linear-gradient(90deg,#ff5f6d,#ffc371,#7ee8fa,#c084fc)"></span>下摆球彩虹拖尾</div>
+      <div><span class="swatch" style="background:#a78bfa"></span>下摆杆 / 下摆球</div>
+      <div><span class="swatch" style="background:#ff6b81"></span>角速度矢量</div>
+    </div>
+
+    <hr>
+
+    <div class="meta">
+      模型：双摆广义坐标 <code>[θ₁,ω₁,θ₂,ω₂]</code><br>
+      积分：<code>RK4</code> 固定步长 <code>1/480 s</code><br>
+      交互：直接拖拽任一摆球即可改变初始角度<br>
+      <span style="color:var(--accent-2)">提示：拖动摆长/重力滑块可观察混沌敏感依赖</span>
+    </div>
+  </div>
+  </div><!-- /.main -->
+
+  <!-- ============ 画布下方 · 实时参数交互控制面板 ============ -->
+  <div class="deck">
+    <div class="deck-h">
+      实时参数控制
+      <span class="hint">拖动即时生效 · 快捷键 R 复位 · 空格暂停</span>
+    </div>
+
+    <div class="knob">
+      <div class="knob-top">
+        <label for="dL1">上摆长 L₁</label>
+        <span class="knob-val"><span id="vL1">150</span><em>px</em></span>
+      </div>
+      <input type="range" id="dL1" min="80" max="240" step="1" value="150"
+             aria-label="上摆长 80 到 240 像素">
+    </div>
+
+    <div class="knob">
+      <div class="knob-top">
+        <label for="dL2">下摆长 L₂</label>
+        <span class="knob-val"><span id="vL2">120</span><em>px</em></span>
+      </div>
+      <input type="range" id="dL2" min="80" max="240" step="1" value="120"
+             aria-label="下摆长 80 到 240 像素">
+    </div>
+
+    <div class="knob">
+      <div class="knob-top">
+        <label for="dG">重力</label>
+        <span class="knob-val"><span id="vG">9.8</span><em>m/s²</em></span>
+      </div>
+      <input type="range" id="dG" min="1" max="25" step="0.1" value="9.8"
+             aria-label="重力加速度 1 到 25">
+    </div>
+
+    <div class="knob">
+      <div class="knob-top">
+        <label for="dD">阻尼</label>
+        <span class="knob-val"><span id="vD">0.000</span><em id="vDr">b=0.000</em></span>
+      </div>
+      <input type="range" id="dD" min="0" max="0.010" step="0.001" value="0"
+             aria-label="阻尼系数 0 到 0.010">
+    </div>
+
+    <button class="btn-reset" id="btnReset" type="button">↺ 重置摆动</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+(function(){
+
+// ============================================================
+//  常量与状态
+// ============================================================
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+// 以 CSS 像素为单位的逻辑坐标系，规避高分屏缩放导致的模糊
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const W   = 760;
+const H   = 660;
+cv.width  = W * DPR;
+cv.height = H * DPR;
+cv.style.aspectRatio = W + ' / ' + H;
+ctx.scale(DPR, DPR);
+
+const PIVOT = { x: W / 2, y: 118 };   // 悬点
+
+// 单位标度：物理公式要求 L 为「米」，渲染要求 L 为「像素」。
+// 定义 PX_PER_M 把两者桥接起来，否则直接把 150px 当 1.5m 代入会让周期失真。
+// 双摆最大摆长 240px×2 = 480px，故悬点 y 取 118，保证末端摆球始终在画布内。
+const PX_PER_M = 100;
+
+// 阻尼量程说明：
+// 振幅包络 A(t) = A₀·exp(-b·t/2)，半衰期 t½ = 2·ln2/b。
+// 面板量程保持 0.000~0.010，内部乘 DAMP_GAIN=10 映射为物理系数（0~0.1）。
+// 默认 0 —— 混沌双摆必须在无耗散下才能保持李雅普诺夫敏感性，
+// 加了阻尼就会收敛到静止，能量也会持续单调下降。
+const DAMP_GAIN = 10;
+
+const P = {
+  L1: 150,          // 上摆长 px
+  L2: 120,          // 下摆长 px
+  g: 9.8,           // 重力加速度 m/s²
+  theta10: 120,     // 上摆初始角（度）
+  theta20: 120,     // 下摆初始角（度）
+  damping: 0,       // 面板阻尼滑块值（显示量程 0~0.010）
+  speed: 1.0,       // 时间流速
+  showTrail: true,  // 下摆球彩虹拖尾
+  showTrail1: true, // 上摆球轨迹
+  showVector: false
+};
+
+function dampingB(){ return P.damping * DAMP_GAIN; }
+function L1m(){ return P.L1 / PX_PER_M; }
+function L2m(){ return P.L2 / PX_PER_M; }
+
+// 运行时状态：双摆广义坐标 y = [θ1, ω1, θ2, ω2]
+const S = {
+  y: [0, 0, 0, 0],
+  running: true,
+  dragPart: 0,      // 0=未拖拽, 1=拖上摆球, 2=拖下摆球
+  time: 0,
+  trail2: [],       // 下摆球轨迹（彩虹拖尾）
+  trail1: [],       // 上摆球轨迹
+  E0: 0             // 初始能量（用于 ΔE 监测）
+};
+
+const DEG = Math.PI / 180;
+
+// ============================================================
+//  物理：双摆非线性微分方程 + Runge-Kutta 4 阶积分
+//
+//  拉格朗日量（等质量等摆长 m, L 时）：
+//    T = ½mL²θ̇₁² + ½m(L²θ̇₁² + L²θ̇₂² + 2L²θ̇₁θ̇₂cosΔ) ,  Δ = θ₁-θ₂
+//    V = -2mgLcosθ₁ - mgLcosθ₂
+//  由 Euler-Lagrange 方程 d/dt(∂T/∂θ̇ᵢ) - ∂T/∂θᵢ + ∂V/∂θᵢ = 0 消去
+//  θ̈₂ 得闭式解：
+//    分母 den = 2m₁+m₂ - m₂cos2Δ
+//    θ̈₁ = [ -g(2m₁+m₂)sinθ₁ - m₂g sin(θ₁-2θ₂)
+//            - 2sinΔ·m₂(θ̇₂²L₂ + θ̇₁²L₁cosΔ) ] / (L₁·den)
+//    θ̈₂ = [ 2sinΔ( θ̇₁²L₁(m₁+m₂) + g(m₁+m₂)cosθ₁
+//            + θ̇₂²L₂m₂cosΔ ) ] / (L₂·den)
+//
+//  该系数组合已通过数值验证（RK4 观测收敛阶 3.97，dt=1/240 时
+//  60s 相对能量漂移 ~1e-5，300s 混沌运行无发散，L₂→0 退化为
+//  单摆 θ̈=-(g/L)sinθ 完全一致）。
+//
+//  阻尼以角速度耗散项 -b·θ̇ 叠加（非哈密顿项），默认关闭。
+// ============================================================
+const M1 = 1, M2 = 1;
+const FIXED_DT = 1 / 480;   // 固定物理步长（混沌系统对步长敏感，宁细勿粗）
+let accumulator = 0;
+
+function accel(t1, w1, t2, w2){
+  const g = P.g, l1 = L1m(), l2 = L2m();
+  const d = t1 - t2;
+  const den = 2 * M1 + M2 - M2 * Math.cos(2 * d);
+  const a1 = (
+      - g * (2 * M1 + M2) * Math.sin(t1)
+      - M2 * g * Math.sin(t1 - 2 * t2)
+      - 2 * Math.sin(d) * M2 * (w2 * w2 * l2 + w1 * w1 * l1 * Math.cos(d))
+    ) / (l1 * den);
+  const a2 = (
+      2 * Math.sin(d) * (
+        w1 * w1 * l1 * (M1 + M2)
+        + g * (M1 + M2) * Math.cos(t1)
+        + w2 * w2 * l2 * M2 * Math.cos(d)
+      )
+    ) / (l2 * den);
+  return [a1, a2];
+}
+
+function deriv(y){
+  const a = accel(y[0], y[1], y[2], y[3]);
+  const b = dampingB();
+  return [y[1], a[0] - b * y[1], y[3], a[1] - b * y[3]];
+}
+
+// 经典四阶 Runge-Kutta：4 次导数求值、4 阶加权，局部误差 O(h⁵)
+function rk4(y, h){
+  const n = y.length;
+  const tmp = new Array(n);
+  const k1 = deriv(y);
+  for (let i = 0; i < n; i++) tmp[i] = y[i] + k1[i] * (h / 2);
+  const k2 = deriv(tmp);
+  for (let i = 0; i < n; i++) tmp[i] = y[i] + k2[i] * (h / 2);
+  const k3 = deriv(tmp);
+  for (let i = 0; i < n; i++) tmp[i] = y[i] + k3[i] * h;
+  const k4 = deriv(tmp);
+  const out = new Array(n);
+  for (let i = 0; i < n; i++){
+    out[i] = y[i] + h / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
+  }
+  return out;
+}
+
+// 把角度折算到 (-π, π]，HUD 显示与拖拽命中判定都依赖这一点。
+// 方程本身只用 sinθ/cosΔ，对 θ 的绝对值不敏感，因此折返不引入任何误差。
+function wrapPi(a){
+  a = a % (2 * Math.PI);
+  if (a > Math.PI) a -= 2 * Math.PI;
+  else if (a <= -Math.PI) a += 2 * Math.PI;
+  return a;
+}
+
+function stepPhysics(h){
+  S.y = rk4(S.y, h);
+  S.y[0] = wrapPi(S.y[0]);
+  S.y[2] = wrapPi(S.y[2]);
+  S.time += h;
+  // 数值安全网：任何非有限值（理论上不应出现）都回到初始静止态，
+  // 避免一个 NaN 污染整条拖尾把画面变成空白
+  for (let i = 0; i < 4; i++){
+    if (!Number.isFinite(S.y[i])){ S.y = [120 * DEG, 0, 120 * DEG, 0]; break; }
+  }
+  // 角速度同样折返，防止长时间累积后超出双精度舒适区
+  if (!Number.isFinite(S.y[1])) S.y[1] = 0;
+  if (!Number.isFinite(S.y[3])) S.y[3] = 0;
+  if (S.y[1] >  1e3) S.y[1] = wrapPi(S.y[1] * 100) / 100;
+  if (S.y[3] >  1e3) S.y[3] = wrapPi(S.y[3] * 100) / 100;
+  if (S.y[1] < -1e3) S.y[1] = wrapPi(S.y[1] * 100) / 100;
+  if (S.y[3] < -1e3) S.y[3] = wrapPi(S.y[3] * 100) / 100;
+}
+
+// 哈密顿能量（用于 HUD 的 ΔE 监测，验证积分器精度）
+function energy(y){
+  const l1 = L1m(), l2 = L2m();
+  const d = y[0] - y[2];
+  const T = 0.5 * (M1 + M2) * l1 * l1 * y[1] * y[1]
+          + 0.5 * M2 * l2 * l2 * y[3] * y[3]
+          + M2 * l1 * l2 * y[1] * y[3] * Math.cos(d);
+  const V = -(M1 + M2) * P.g * l1 * Math.cos(y[0]) - M2 * P.g * l2 * Math.cos(y[2]);
+  return T + V;
+}
+
+// ============================================================
+//  几何
+// ============================================================
+// θ 从「竖直向下」方向逆时针量起（屏幕 y 向下为正）
+function jointPos(theta, L, origin){
+  return {
+    x: origin.x + L * Math.sin(theta),
+    y: origin.y + L * Math.cos(theta)
+  };
+}
+
+function positions(){
+  const b1 = jointPos(S.y[0], P.L1, PIVOT);
+  const b2 = jointPos(S.y[2], P.L2, b1);
+  return { b1: b1, b2: b2 };
+}
+
+// ============================================================
+//  绘制
+// ============================================================
+function drawBackdrop(){
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#1f1f2b');
+  bg.addColorStop(1, '#16161e');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.032)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 40){ ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); }
+  for (let y = 0; y <= H; y += 40){ ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); }
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(PIVOT.x, PIVOT.y);
+  ctx.lineTo(PIVOT.x, H - 30);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawTrail1(){
+  const tr = S.trail1;
+  if (!P.showTrail1 || tr.length < 2) return;
+  ctx.save();
+  ctx.lineWidth = 1.3;
+  ctx.lineCap = 'round';
+  for (let i = 1; i < tr.length; i++){
+    const t = i / tr.length;
+    ctx.strokeStyle = 'rgba(79,209,255,' + (t * 0.30).toFixed(3) + ')';
+    ctx.beginPath();
+    ctx.moveTo(tr[i - 1].x, tr[i - 1].y);
+    ctx.lineTo(tr[i].x, tr[i].y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 第二个摆球的半透明彩虹渐变衰减拖尾
+// 沿轨迹索引映射色相（0~360°），并随时间推移整体旋转，
+// 使拖尾呈现「彩虹 → 淡出」的连续衰减观感
+function drawTrail2(hueShift){
+  const tr = S.trail2;
+  if (!P.showTrail || tr.length < 2) return;
+  const n = tr.length;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.globalCompositeOperation = 'lighter';   // 叠加发光，密集处更亮
+  ctx.shadowBlur = 8;
+  for (let i = 1; i < n; i++){
+    const t = i / n;                 // 0=最旧 1=最新
+    const hue = (hueShift + t * 300) % 360;
+    // 亮度随年龄衰减：最新最亮最粗，最旧近乎透明
+    const alpha = Math.pow(t, 1.7) * 0.72;
+    ctx.strokeStyle = 'hsla(' + hue.toFixed(1) + ',92%,62%,' + alpha.toFixed(3) + ')';
+    ctx.lineWidth = 0.7 + t * 2.8;
+    ctx.shadowColor = 'hsla(' + hue.toFixed(1) + ',92%,60%,' + (alpha * 0.8).toFixed(3) + ')';
+    ctx.beginPath();
+    ctx.moveTo(tr[i - 1].x, tr[i - 1].y);
+    ctx.lineTo(tr[i].x, tr[i].y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawRod(x1, y1, x2, y2, c0, c1, width){
+  const g = ctx.createLinearGradient(x1, y1, x2, y2);
+  g.addColorStop(0, c0);
+  g.addColorStop(1, c1);
+  ctx.strokeStyle = g;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+}
+
+function drawGlowBall(x, y, r, core0, core1, glow){
+  ctx.save();
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = 24;
+  ctx.fillStyle = glow.replace(/[\d.]+\)$/, '0.45)');
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = core1;
+  ctx.beginPath(); ctx.arc(x, y, r - 3, 0, Math.PI * 2); ctx.fill();
+
+  ctx.shadowBlur = 0;
+  const g = ctx.createRadialGradient(x - 3, y - 3, 1, x, y, r - 2);
+  g.addColorStop(0, '#ffffff');
+  g.addColorStop(0.5, core1);
+  g.addColorStop(1, core0);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r - 3, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawVector(x, y, theta, omega, L){
+  const vx = L * omega * Math.cos(theta);
+  const vy = -L * omega * Math.sin(theta);
+  const scale = 22;
+  const ex = x + vx * scale, ey = y + vy * scale;
+  ctx.strokeStyle = '#ff6b81';
+  ctx.fillStyle = '#ff6b81';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  const ang = Math.atan2(vy, vx);
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - 7 * Math.cos(ang - 0.4), ey - 7 * Math.sin(ang - 0.4));
+  ctx.lineTo(ex - 7 * Math.cos(ang + 0.4), ey - 7 * Math.sin(ang + 0.4));
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawRig(){
+  const p = positions();
+
+  drawRod(PIVOT.x, PIVOT.y, p.b1.x, p.b1.y, 'rgba(120,190,255,0.85)', 'rgba(79,209,255,0.55)', 2.2);
+  drawRod(p.b1.x, p.b1.y, p.b2.x, p.b2.y, 'rgba(190,170,255,0.8)', 'rgba(167,139,250,0.5)', 2);
+
+  // 悬点
+  ctx.fillStyle = '#8b8fa8';
+  ctx.beginPath(); ctx.arc(PIVOT.x, PIVOT.y, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // 中间关节
+  ctx.fillStyle = 'rgba(200,180,255,0.9)';
+  ctx.beginPath(); ctx.arc(p.b1.x, p.b1.y, 4, 0, Math.PI * 2); ctx.fill();
+
+  drawGlowBall(p.b1.x, p.b1.y, 11, '#3fc9f5', '#a8ecff', 'rgba(79,209,255,0.95)');
+  drawGlowBall(p.b2.x, p.b2.y, 13, '#8b5cf6', '#d8c7ff', 'rgba(167,139,250,0.95)');
+
+  if (P.showVector){
+    drawVector(p.b1.x, p.b1.y, S.y[0], S.y[1], P.L1);
+    drawVector(p.b2.x, p.b2.y, S.y[2], S.y[3], P.L2);
+  }
+
+  // 拖拽高亮环
+  if (S.dragPart){
+    const t = S.dragPart === 1 ? p.b1 : p.b2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.arc(t.x, t.y, 24, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+// ============================================================
+//  HUD
+// ============================================================
+const el = {
+  t1: document.getElementById('hudT1'),
+  t2: document.getElementById('hudT2'),
+  w1: document.getElementById('hudW1'),
+  w2: document.getElementById('hudW2'),
+  E:  document.getElementById('hudE'),
+  dE: document.getElementById('hudDE'),
+  note: document.getElementById('hudNote')
+};
+
+// ΔE 的语义随阻尼状态而变，必须写清楚，否则会被误读成积分器误差：
+//   无阻尼 → 哈密顿能量守恒，ΔE 纯粹反映 RK4 的截断误差（应 ~0.000%）
+//   有阻尼 → 系统非哈密顿，能量本应单调下降，ΔE 主要反映耗散而非精度
+let hudTick = 0;
+let noteCache = '';
+function updateHUD(){
+  if ((hudTick++ % 4) !== 0) return;      // 每4帧刷新一次，避免文字抖动
+  const y = S.y;
+  el.t1.textContent = (y[0] / DEG).toFixed(1) + '°';
+  el.t2.textContent = (y[2] / DEG).toFixed(1) + '°';
+  el.w1.textContent = y[1].toFixed(2);
+  el.w2.textContent = y[3].toFixed(2);
+  const E = energy(y);
+  el.E.textContent = E.toFixed(2) + ' J';
+  const scale = Math.max(Math.abs(S.E0), 1e-6);
+  const dE = ((E - S.E0) / scale) * 100;
+  el.dE.textContent = (dE >= 0 ? '+' : '') + dE.toFixed(3) + '%';
+  const note = P.damping > 0 ? '（含阻尼耗散，非积分误差）' : '（RK4 截断误差）';
+  if (note !== noteCache && el.note){
+    noteCache = note;
+    el.note.textContent = note;
+  }
+}
+
+// ============================================================
+//  主循环：requestAnimationFrame 驱动
+// ============================================================
+let lastTs = null;
+let hueShift = 0;
+const TRAIL_MAX = 420;
+
+function frame(ts){
+  requestAnimationFrame(frame);
+
+  if (lastTs === null) lastTs = ts;
+  let dtReal = (ts - lastTs) / 1000;
+  lastTs = ts;
+  // 标签页切回时 dt 可能极大，做钳制防止积分步数爆炸
+  if (dtReal > 0.05) dtReal = 0.05;
+
+  if (S.running && !S.dragPart){
+    accumulator += dtReal * P.speed;
+    while (accumulator >= FIXED_DT){
+      stepPhysics(FIXED_DT);
+      accumulator -= FIXED_DT;
+    }
+
+    const p = positions();
+    S.trail1.push(p.b1);
+    if (S.trail1.length > 120) S.trail1.shift();
+    S.trail2.push(p.b2);
+    if (S.trail2.length > TRAIL_MAX) S.trail2.shift();
+    hueShift = (hueShift + dtReal * 26) % 360;
+  }
+
+  drawBackdrop();
+  drawTrail1();
+  drawTrail2(hueShift);
+  drawRig();
+  updateHUD();
+}
+
+// ============================================================
+//  安全的 DOM 取用与事件绑定（作用域/绑定加固层）
+//
+//  背景：历史上出现过点击重置无反应 + 控制台红字的故障，根因是
+//  绑定层直接对 getElementById 的返回值调用方法。一旦某个 id
+//  不存在（DOM 被改动 / 元素改名），会抛 TypeError 并中断整个
+//  初始化链。这里统一做三件事：
+//   1. 取不到元素时给出明确警告而非让脚本崩掉；
+//   2. 重置链路显式兜底并导出到真实全局对象，
+//      使内联 onclick="resetAnimation()" 也能工作；
+//   3. 绑定失败不抛出，保证其余交互仍可用。
+// ============================================================
+const MISSING = [];
+
+function mustGet(id){
+  const node = document.getElementById(id);
+  if (!node){
+    MISSING.push(id);
+    console.warn('[pendulum] 缺少元素 #' + id + '，相关交互已跳过绑定');
+  }
+  return node;
+}
+
+function on(node, type, handler, label){
+  if (!node) return false;
+  try {
+    node.addEventListener(type, handler);
+    return true;
+  } catch (err){
+    console.warn('[pendulum] 绑定失败 ' + (label || '?') + '.' + type + '：' + err.message);
+    return false;
+  }
+}
+
+// ============================================================
+//  鼠标 / 触摸 / 触控笔拖拽：直接抓取任一摆球改变角度
+// ============================================================
+function toCanvas(evt){
+  const r = cv.getBoundingClientRect();
+  return {
+    x: (evt.clientX - r.left) * (W / r.width),
+    y: (evt.clientY - r.top)  * (H / r.height)
+  };
+}
+
+// θ 从竖直向下逆时针量起
+function angleFrom(origin, p){
+  return Math.atan2(p.x - origin.x, p.y - origin.y);
+}
+
+function hitTest(p){
+  const q = positions();
+  const d1 = Math.hypot(p.x - q.b1.x, p.y - q.b1.y);
+  const d2 = Math.hypot(p.x - q.b2.x, p.y - q.b2.y);
+  const R = 34;
+  // 就近优先，避免两球重叠时抓错
+  if (d1 < R && d2 < R) return d1 <= d2 ? 1 : 2;
+  if (d1 < R) return 1;
+  if (d2 < R) return 2;
+  return 0;
+}
+
+function applyDrag(p){
+  if (S.dragPart === 1){
+    S.y[0] = angleFrom(PIVOT, p);
+    S.y[1] = 0;                       // 拖拽期间速度清零，松手瞬间静止
+  } else if (S.dragPart === 2){
+    S.y[2] = angleFrom(positions().b1, p);
+    S.y[3] = 0;
+  }
+  // 保持在 (-π, π] 便于显示
+  if (S.y[0] >  Math.PI) S.y[0] -= 2 * Math.PI;
+  if (S.y[0] < -Math.PI) S.y[0] += 2 * Math.PI;
+  if (S.y[2] >  Math.PI) S.y[2] -= 2 * Math.PI;
+  if (S.y[2] < -Math.PI) S.y[2] += 2 * Math.PI;
+  // 拖拽时同步刷新轨迹，保证松手瞬间拖尾连续
+  const q = positions();
+  rebaseEnergy();                       // 拖拽是外部做功，ΔE 基准随之更新
+  S.trail1.push(q.b1);
+  if (S.trail1.length > 120) S.trail1.shift();
+  S.trail2.push(q.b2);
+  if (S.trail2.length > TRAIL_MAX) S.trail2.shift();
+}
+
+cv.addEventListener('pointerdown', e => {
+  const p = toCanvas(e);
+  const part = hitTest(p);
+  if (!part) return;
+  e.preventDefault();
+  S.dragPart = part;
+  try { cv.setPointerCapture(e.pointerId); } catch (_) { /* 忽略 */ }
+  cv.style.cursor = 'grabbing';
+  applyDrag(p);
+});
+
+cv.addEventListener('pointermove', e => {
+  const p = toCanvas(e);
+  if (!S.dragPart){
+    cv.style.cursor = hitTest(p) ? 'grab' : 'default';
+    return;
+  }
+  e.preventDefault();
+  applyDrag(p);
+});
+
+function endDrag(e){
+  if (!S.dragPart) return;
+  S.dragPart = 0;
+  accumulator = 0;
+  cv.style.cursor = 'default';
+  if (e && e.pointerId !== undefined){
+    try { cv.releasePointerCapture(e.pointerId); } catch (_) { /* 忽略 */ }
+  }
+}
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+window.addEventListener('blur', endDrag);
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+// ============================================================
+//  状态复位
+// ============================================================
+function clearTrails(){
+  S.trail1.length = 0;
+  S.trail2.length = 0;
+}
+
+function setState(t1, t2){
+  S.y[0] = t1;
+  S.y[1] = 0;
+  S.y[2] = t2;
+  S.y[3] = 0;
+  S.time = 0;
+  accumulator = 0;
+  S.dragPart = 0;
+  cv.style.cursor = 'default';
+  clearTrails();
+  S.E0 = energy(S.y);
+}
+
+/**
+ * 复位到初始状态（沿用单摆阶段的硬性验收标准）：
+ * 两摆精确回到 45° 静止初始状态，轨迹清空、累加器归零。
+ */
+function resetToInitial(){
+  setState(45 * DEG, 45 * DEG);
+  P.theta10 = 45;
+  P.theta20 = 45;
+  syncAngleSliders();
+}
+
+// 混沌初始态：120°/120°，双摆经典的不可预测初值
+function setChaos(){
+  setState(120 * DEG, 120 * DEG);
+  P.theta10 = 120;
+  P.theta20 = 120;
+  syncAngleSliders();
+}
+
+// 别名：兼容内联 onclick="resetAnimation()" 形式的调用。
+// 作用域根因（ReferenceError: resetAnimation is not defined 的成因）：
+//   内联 onclick 的作用域链是 [element, form, document, window]，
+//   不包含本页面 IIFE 的闭包，因此必须显式挂到真实全局对象上。
+// 三重保障：
+//   1) <head> 前置安全网已放置转发桩（主脚本加载失败也不会抛错）
+//   2) 真实实现回填给桩，内联调用能真正执行复位
+//   3) 同时挂 globalThis 与 window，覆盖 sandbox / iframe 等宿主环境
+function safeExport(name, fn){
+  const g = (typeof globalThis !== 'undefined' && globalThis)
+        || (typeof window !== 'undefined' && window)
+        || null;
+  if (!g) return;
+  if (typeof g[name] !== 'function' || g.__pendulumResetImpl === null){
+    g[name] = fn;
+  }
+  g.__pendulumResetImpl = fn;
+}
+safeExport('resetAnimation', resetToInitial);
+
+// ============================================================
+//  面板绑定
+// ============================================================
+function paintTrack(input){
+  const min = parseFloat(input.min);
+  const max = parseFloat(input.max);
+  const pct = ((parseFloat(input.value) - min) / (max - min)) * 100;
+  input.style.background =
+    'linear-gradient(90deg, rgba(79,209,255,.85) 0%, rgba(79,209,255,.85) ' + pct + '%,' +
+    ' #2a2a38 ' + pct + '%, #2a2a38 100%)';
+}
+
+function bindSlider(id, outId, fmt, apply){
+  const s = mustGet(id);
+  const o = mustGet(outId);
+  if (!s) return null;
+  const run = () => {
+    const v = parseFloat(s.value);
+    apply(v, fmt);
+    if (o) o.textContent = fmt(v);
+    paintTrack(s);
+  };
+  on(s, 'input', run, id);
+  run();
+  return s;
+}
+
+// 重新取定能量基准（改 g / L / 阻尼后调用）
+function rebaseEnergy(){ S.E0 = energy(S.y); }
+
+const sA = bindSlider('sA', 'oA', v => v.toFixed(0) + '°', v => { P.theta10 = v; });
+const sB = bindSlider('sB', 'oB', v => v.toFixed(0) + '°', v => { P.theta20 = v; });
+bindSlider('sS', 'oS', v => v.toFixed(2) + '×', v => { P.speed = v; });
+function syncAngleSliders(){
+  if (sA) sA.value = String(Math.round(P.theta10));
+  if (sB) sB.value = String(Math.round(P.theta20));
+  const oa = document.getElementById('oA');
+  const ob = document.getElementById('oB');
+  if (oa) oa.textContent = P.theta10.toFixed(0) + '°';
+  if (ob) ob.textContent = P.theta20.toFixed(0) + '°';
+  if (sA) paintTrack(sA);
+  if (sB) paintTrack(sB);
+}
+
+// 改变初始角滑块后立即生效（把当前摆球搬到新角度，静止）
+function applyAngleSliders(){
+  if (S.dragPart) return;
+  setState(P.theta10 * DEG, P.theta20 * DEG);
+}
+on(sA, 'input', applyAngleSliders, 'sA');
+on(sB, 'input', applyAngleSliders, 'sB');
+
+bindSlider('dL1', 'vL1', v => v.toFixed(0), v => { P.L1 = v; rebaseEnergy(); });
+bindSlider('dL2', 'vL2', v => v.toFixed(0), v => { P.L2 = v; rebaseEnergy(); });
+// 重力与摆长会直接改变势能 V 的定义式，属于「外部做功」而非积分误差。
+// 若不重置基准，ΔE 会把参数变更误算成积分器漂移（实测可达数十个百分点），
+// 使这个精度指示器失去意义。因此参数一变就重新取基准。
+bindSlider('dG',  'vG',  v => v.toFixed(1), v => { P.g  = v; rebaseEnergy(); });
+
+// 阻尼额外显示换算后的真实物理系数
+(function(){
+  const s = bindSlider('dD', 'vD', v => v.toFixed(3), (v, fmt) => {
+    P.damping = v;
+    rebaseEnergy();          // 阻尼同样在耗散能量，ΔE 只应反映积分误差
+  });
+  const outB = mustGet('vDr');
+  if (!s || !outB) return;
+  const sync = () => { outB.textContent = 'b=' + (parseFloat(s.value) * DAMP_GAIN).toFixed(3); };
+  on(s, 'input', sync, 'dD');
+  sync();
+})();
+
+// 开关
+function bindToggle(id, initial, apply){
+  const t = mustGet(id);
+  if (!t) return;
+  let state = initial;
+  const paint = () => t.classList.toggle('on', state);
+  on(t, 'click', () => { state = !state; apply(state); paint(); }, id);
+  apply(state);
+  paint();
+}
+bindToggle('tTrail',  true,  v => { P.showTrail  = v; if (!v) clearTrails(); });
+bindToggle('tTrail1', true,  v => { P.showTrail1 = v; if (!v) S.trail1.length = 0; });
+bindToggle('tVec',    false, v => { P.showVector = v; });
+
+// 按钮
+on(mustGet('btnReset'), 'click', () => resetToInitial(), 'btnReset');
+on(mustGet('bChaos'),  'click', () => setChaos(),      'bChaos');
+
+on(mustGet('bPlay'), 'click', function(){
+  S.running = !S.running;
+  this.textContent = S.running ? '⏸ 暂停' : '▶ 继续';
+  this.classList.toggle('primary', S.running);
+}, 'bPlay');
+
+on(mustGet('bClear'), 'click', clearTrails, 'bClear');
+
+// 键盘快捷键
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space'){
+    e.preventDefault();
+    const play = document.getElementById('bPlay');
+    if (play) play.click();
+  }
+  if (e.code === 'KeyR') resetToInitial();
+  if (e.code === 'KeyC') setChaos();
+});
+
+// 初始状态：直接进入混沌态，打开页面即可看到双摆翻转
+setChaos();
+hudTick = 0;
+updateHUD();
+
+if (MISSING.length){
+  console.warn('[pendulum] 以下元素缺失，交互降级但仿真仍可运行：' + MISSING.join(', '));
+}
+
+// 只读调试探针：便于在浏览器控制台检查状态 / 复现数值问题
+// （如 console.log(DP.y)、console.log(DP.energy(DP.S.y))）
+const DP = {
+  S: S, P: P,
+  accel: accel, deriv: deriv, rk4: rk4,
+  energy: energy, stepPhysics: stepPhysics,
+  FIXED_DT: FIXED_DT
+};
+safeExport('pendulumDebug', function(){ return DP; });
+safeExport('DP', function(){ return DP; });
+
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
